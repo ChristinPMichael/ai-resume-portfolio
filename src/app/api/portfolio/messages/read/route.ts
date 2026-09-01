@@ -1,8 +1,7 @@
 import { NextResponse } from "next/server";
-
-import { auth } from "@/lib/auth";
 import { headers } from "next/headers";
 
+import { auth } from "@/lib/auth";
 import { db } from "@/db";
 
 import {
@@ -10,44 +9,40 @@ import {
   portfolioProfiles,
 } from "@/db/schema";
 
-import {
-  eq,
-  and,
-} from "drizzle-orm";
+import { eq, and } from "drizzle-orm";
 
 export const runtime = "nodejs";
 
-export async function POST(
-  request: Request,
-) {
+export async function POST(request: Request) {
   try {
-    const session =
-      await auth.api.getSession({
-        headers: await headers(),
-      });
+    // =====================================================
+    // AUTHENTICATION
+    // =====================================================
+
+    const session = await auth.api.getSession({
+      headers: await headers(),
+    });
 
     if (!session) {
       return NextResponse.redirect(
-        new URL(
-          "/login",
-          request.url,
-        ),
+        new URL("/login", request.url),
       );
     }
 
-    const formData =
-      await request.formData();
+    // =====================================================
+    // FORM DATA
+    // =====================================================
 
-    const messageId =
-      String(
-        formData.get("messageId") ?? "",
-      ).trim();
+    const formData = await request.formData();
+
+    const messageId = String(
+      formData.get("messageId") ?? "",
+    ).trim();
 
     if (!messageId) {
       return NextResponse.json(
         {
-          error:
-            "Message ID is required.",
+          error: "Message ID is required.",
         },
         {
           status: 400,
@@ -55,9 +50,9 @@ export async function POST(
       );
     }
 
-    /* -----------------------------------------------------
-       Find user's portfolio
-    ----------------------------------------------------- */
+    // =====================================================
+    // FIND USER'S PORTFOLIO
+    // =====================================================
 
     const [portfolio] = await db
       .select({
@@ -75,8 +70,7 @@ export async function POST(
     if (!portfolio) {
       return NextResponse.json(
         {
-          error:
-            "Portfolio not found.",
+          error: "Portfolio not found.",
         },
         {
           status: 404,
@@ -84,28 +78,51 @@ export async function POST(
       );
     }
 
-    /* -----------------------------------------------------
-       Mark message as read
-    ----------------------------------------------------- */
+    // =====================================================
+    // MARK MESSAGE AS READ
+    // =====================================================
 
-    await db
-      .update(contactMessages)
-      .set({
-        isRead: true,
-        readAt: new Date(),
-      })
-      .where(
-        and(
-          eq(
-            contactMessages.id,
-            messageId,
+    const [updatedMessage] =
+      await db
+        .update(contactMessages)
+        .set({
+          isRead: true,
+          readAt: new Date(),
+        })
+        .where(
+          and(
+            eq(
+              contactMessages.id,
+              messageId,
+            ),
+            eq(
+              contactMessages.portfolioId,
+              portfolio.id,
+            ),
           ),
-          eq(
-            contactMessages.portfolioId,
-            portfolio.id,
-          ),
-        ),
+        )
+        .returning({
+          id: contactMessages.id,
+        });
+
+    // =====================================================
+    // MESSAGE NOT FOUND
+    // =====================================================
+
+    if (!updatedMessage) {
+      return NextResponse.json(
+        {
+          error: "Message not found.",
+        },
+        {
+          status: 404,
+        },
       );
+    }
+
+    // =====================================================
+    // REDIRECT
+    // =====================================================
 
     return NextResponse.redirect(
       new URL(
