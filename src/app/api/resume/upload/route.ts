@@ -6,17 +6,37 @@ import { headers } from "next/headers";
 import { db } from "@/db";
 import { resumes } from "@/db/schema";
 
-import { extractText, getDocumentProxy } from "unpdf";
+import {
+  extractText,
+  getDocumentProxy,
+} from "unpdf";
+
 import mammoth from "mammoth";
 
 export const runtime = "nodejs";
 
 /* =========================================================
-   PDF TEXT EXTRACTION
-   ========================================================= */
+   CONSTANTS
+========================================================= */
 
-async function extractPdfText(buffer: ArrayBuffer) {
-  const pdf = await getDocumentProxy(new Uint8Array(buffer));
+const MAX_FILE_SIZE = 5 * 1024 * 1024;
+const MAX_TEXT_LENGTH = 100_000;
+
+const PDF_TYPE = "application/pdf";
+
+const DOCX_TYPE =
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/* =========================================================
+   PDF TEXT EXTRACTION
+========================================================= */
+
+async function extractPdfText(
+  buffer: ArrayBuffer,
+) {
+  const pdf = await getDocumentProxy(
+    new Uint8Array(buffer),
+  );
 
   const { text } = await extractText(pdf, {
     mergePages: true,
@@ -27,37 +47,100 @@ async function extractPdfText(buffer: ArrayBuffer) {
 
 /* =========================================================
    DOCX TEXT EXTRACTION
-   ========================================================= */
+========================================================= */
 
-async function extractDocxText(buffer: ArrayBuffer) {
-  const result = await mammoth.extractRawText({
-    buffer: Buffer.from(buffer),
-  });
+async function extractDocxText(
+  buffer: ArrayBuffer,
+) {
+  const result =
+    await mammoth.extractRawText({
+      buffer: Buffer.from(buffer),
+    });
 
   return result.value.trim();
 }
 
 /* =========================================================
    ARRAYBUFFER → BASE64
-   ========================================================= */
+========================================================= */
 
-function arrayBufferToBase64(buffer: ArrayBuffer) {
-  return Buffer.from(buffer).toString("base64");
+function arrayBufferToBase64(
+  buffer: ArrayBuffer,
+) {
+  return Buffer.from(buffer).toString(
+    "base64",
+  );
+}
+
+/* =========================================================
+   FILE SIGNATURE VALIDATION
+========================================================= */
+
+function isPdf(
+  buffer: ArrayBuffer,
+): boolean {
+  const bytes = new Uint8Array(buffer);
+
+  // PDF files begin with %PDF
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x25 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x44 &&
+    bytes[3] === 0x46
+  );
+}
+
+function isZip(
+  buffer: ArrayBuffer,
+): boolean {
+  const bytes = new Uint8Array(buffer);
+
+  // DOCX is a ZIP-based format.
+  return (
+    bytes.length >= 4 &&
+    bytes[0] === 0x50 &&
+    bytes[1] === 0x4b &&
+    bytes[2] === 0x03 &&
+    bytes[3] === 0x04
+  );
+}
+
+/* =========================================================
+   SAFE FILE NAME
+========================================================= */
+
+function sanitizeFileName(
+  fileName: string,
+): string {
+  const cleaned = fileName
+    .replace(/[/\\]/g, "_")
+    .replace(/[^\w.\- ()]/g, "_")
+    .trim();
+
+  if (!cleaned) {
+    return "resume";
+  }
+
+  return cleaned.slice(0, 255);
 }
 
 /* =========================================================
    POST /api/resume/upload
-   ========================================================= */
+========================================================= */
 
-export async function POST(request: Request) {
+export async function POST(
+  request: Request,
+) {
   try {
-    /* -------------------------------------------------------
-       1. Authentication
-       ------------------------------------------------------- */
+    // =====================================================
+    // 1. AUTHENTICATION
+    // =====================================================
 
-    const session = await auth.api.getSession({
-      headers: await headers(),
-    });
+    const session =
+      await auth.api.getSession({
+        headers: await headers(),
+      });
 
     if (!session) {
       return NextResponse.json(
@@ -66,118 +149,164 @@ export async function POST(request: Request) {
         },
         {
           status: 401,
-        }
+        },
       );
     }
 
-    /* -------------------------------------------------------
-       2. Get uploaded file
-       ------------------------------------------------------- */
+    // =====================================================
+    // 2. GET UPLOADED FILE
+    // =====================================================
 
-    const formData = await request.formData();
+    const formData =
+      await request.formData();
 
     const file = formData.get("file");
 
     if (!(file instanceof File)) {
       return NextResponse.json(
         {
-          error: "No file uploaded",
+          error: "No file uploaded.",
         },
         {
           status: 400,
-        }
-      );
-    }
-
-    /* -------------------------------------------------------
-       3. Validate file type
-       ------------------------------------------------------- */
-
-    const allowedTypes = [
-      "application/pdf",
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    ];
-
-    if (!allowedTypes.includes(file.type)) {
-      return NextResponse.json(
-        {
-          error: "Only PDF and DOCX files are supported",
         },
-        {
-          status: 400,
-        }
       );
     }
 
-    /* -------------------------------------------------------
-       4. Validate file size
-       ------------------------------------------------------- */
-
-    const maxFileSize = 5 * 1024 * 1024;
-
-    if (file.size > maxFileSize) {
-      return NextResponse.json(
-        {
-          error: "File must be smaller than 5MB",
-        },
-        {
-          status: 400,
-        }
-      );
-    }
+    // =====================================================
+    // 3. FILE SIZE
+    // =====================================================
 
     if (file.size === 0) {
       return NextResponse.json(
         {
-          error: "Uploaded file is empty",
+          error:
+            "Uploaded file is empty.",
         },
         {
           status: 400,
-        }
+        },
       );
     }
 
-    /* -------------------------------------------------------
-       5. Read file
-       ------------------------------------------------------- */
-
-    const buffer = await file.arrayBuffer();
-
-    /* -------------------------------------------------------
-       6. Save original file as Base64
-       ------------------------------------------------------- */
-
-    const fileData = arrayBufferToBase64(buffer);
-
-    if (!fileData) {
+    if (file.size > MAX_FILE_SIZE) {
       return NextResponse.json(
         {
-          error: "Could not read uploaded file",
+          error:
+            "File must be smaller than 5MB.",
         },
         {
           status: 400,
-        }
+        },
       );
     }
 
-    /* -------------------------------------------------------
-       7. Extract resume text
-       ------------------------------------------------------- */
+    // =====================================================
+    // 4. FILE TYPE
+    // =====================================================
+
+    if (
+      file.type !== PDF_TYPE &&
+      file.type !== DOCX_TYPE
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Only PDF and DOCX files are supported.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // =====================================================
+    // 5. READ FILE
+    // =====================================================
+
+    const buffer =
+      await file.arrayBuffer();
+
+    if (buffer.byteLength === 0) {
+      return NextResponse.json(
+        {
+          error:
+            "Uploaded file is empty.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // =====================================================
+    // 6. VERIFY FILE SIGNATURE
+    // =====================================================
+
+    if (
+      file.type === PDF_TYPE &&
+      !isPdf(buffer)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "The uploaded file is not a valid PDF.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (
+      file.type === DOCX_TYPE &&
+      !isZip(buffer)
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "The uploaded file is not a valid DOCX.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // =====================================================
+    // 7. EXTRACT TEXT
+    // =====================================================
 
     let rawText = "";
 
-    if (file.type === "application/pdf") {
-      rawText = await extractPdfText(buffer);
-    } else if (
-      file.type ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ) {
-      rawText = await extractDocxText(buffer);
+    try {
+      if (file.type === PDF_TYPE) {
+        rawText =
+          await extractPdfText(buffer);
+      } else {
+        rawText =
+          await extractDocxText(buffer);
+      }
+    } catch (error) {
+      console.error(
+        "Resume text extraction error:",
+        error,
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "Could not process this file. Please upload a valid text-based PDF or DOCX.",
+        },
+        {
+          status: 400,
+        },
+      );
     }
 
-    /* -------------------------------------------------------
-       8. Make sure text was extracted
-       ------------------------------------------------------- */
+    // =====================================================
+    // 8. TEXT VALIDATION
+    // =====================================================
 
     if (!rawText) {
       return NextResponse.json(
@@ -187,47 +316,96 @@ export async function POST(request: Request) {
         },
         {
           status: 400,
-        }
+        },
       );
     }
 
-    /* -------------------------------------------------------
-       9. Save resume to Neon
-       ------------------------------------------------------- */
+    if (
+      rawText.length > MAX_TEXT_LENGTH
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "The extracted resume text is too large.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
-    const [resume] = await db
-      .insert(resumes)
-      .values({
-        userId: session.user.id,
+    // =====================================================
+    // 9. BASE64
+    // =====================================================
 
-        fileName: file.name,
+    const fileData =
+      arrayBufferToBase64(buffer);
 
-        fileType: file.type,
+    if (!fileData) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not read uploaded file.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
-        fileData,
+    // =====================================================
+    // 10. SAFE FILE NAME
+    // =====================================================
 
-        rawText,
-      })
-      .returning({
-        id: resumes.id,
-      });
+    const safeFileName =
+      sanitizeFileName(file.name);
 
-    /* -------------------------------------------------------
-       10. Return success
-       ------------------------------------------------------- */
+    // =====================================================
+    // 11. SAVE TO DATABASE
+    // =====================================================
+
+    const [resume] =
+      await db
+        .insert(resumes)
+        .values({
+          userId:
+            session.user.id,
+
+          fileName:
+            safeFileName,
+
+          fileType:
+            file.type,
+
+          fileData,
+
+          rawText,
+        })
+        .returning({
+          id: resumes.id,
+        });
+
+    // =====================================================
+    // 12. RETURN SUCCESS
+    // =====================================================
 
     return NextResponse.json({
       success: true,
 
-      resumeId: resume.id,
+      resumeId:
+        resume.id,
 
-      fileName: file.name,
+      fileName:
+        safeFileName,
 
-      fileType: file.type,
+      fileType:
+        file.type,
 
-      fileSize: file.size,
+      fileSize:
+        file.size,
 
-      textLength: rawText.length,
+      textLength:
+        rawText.length,
 
       message:
         "Resume uploaded and processed successfully!",
@@ -235,16 +413,17 @@ export async function POST(request: Request) {
   } catch (error) {
     console.error(
       "Resume processing error:",
-      error
+      error,
     );
 
     return NextResponse.json(
       {
-        error: "Failed to process resume.",
+        error:
+          "Failed to process resume.",
       },
       {
         status: 500,
-      }
+      },
     );
   }
 }
