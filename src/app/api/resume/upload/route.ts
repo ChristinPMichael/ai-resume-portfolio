@@ -13,6 +13,10 @@ import {
 
 import mammoth from "mammoth";
 
+import {
+  resumeUploadRateLimit,
+} from "@/lib/rate-limit";
+
 export const runtime = "nodejs";
 
 /* =========================================================
@@ -22,7 +26,8 @@ export const runtime = "nodejs";
 const MAX_FILE_SIZE = 5 * 1024 * 1024;
 const MAX_TEXT_LENGTH = 100_000;
 
-const PDF_TYPE = "application/pdf";
+const PDF_TYPE =
+  "application/pdf";
 
 const DOCX_TYPE =
   "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
@@ -34,13 +39,15 @@ const DOCX_TYPE =
 async function extractPdfText(
   buffer: ArrayBuffer,
 ) {
-  const pdf = await getDocumentProxy(
-    new Uint8Array(buffer),
-  );
+  const pdf =
+    await getDocumentProxy(
+      new Uint8Array(buffer),
+    );
 
-  const { text } = await extractText(pdf, {
-    mergePages: true,
-  });
+  const { text } =
+    await extractText(pdf, {
+      mergePages: true,
+    });
 
   return text.trim();
 }
@@ -79,7 +86,8 @@ function arrayBufferToBase64(
 function isPdf(
   buffer: ArrayBuffer,
 ): boolean {
-  const bytes = new Uint8Array(buffer);
+  const bytes =
+    new Uint8Array(buffer);
 
   // PDF files begin with %PDF
   return (
@@ -94,9 +102,10 @@ function isPdf(
 function isZip(
   buffer: ArrayBuffer,
 ): boolean {
-  const bytes = new Uint8Array(buffer);
+  const bytes =
+    new Uint8Array(buffer);
 
-  // DOCX is a ZIP-based format.
+  // DOCX files use the ZIP container format
   return (
     bytes.length >= 4 &&
     bytes[0] === 0x50 &&
@@ -113,16 +122,26 @@ function isZip(
 function sanitizeFileName(
   fileName: string,
 ): string {
-  const cleaned = fileName
-    .replace(/[/\\]/g, "_")
-    .replace(/[^\w.\- ()]/g, "_")
-    .trim();
+  const cleaned =
+    fileName
+      .replace(
+        /[/\\]/g,
+        "_",
+      )
+      .replace(
+        /[^\w.\- ()]/g,
+        "_",
+      )
+      .trim();
 
   if (!cleaned) {
     return "resume";
   }
 
-  return cleaned.slice(0, 255);
+  return cleaned.slice(
+    0,
+    255,
+  );
 }
 
 /* =========================================================
@@ -145,7 +164,8 @@ export async function POST(
     if (!session) {
       return NextResponse.json(
         {
-          error: "Unauthorized",
+          error:
+            "Unauthorized",
         },
         {
           status: 401,
@@ -154,18 +174,78 @@ export async function POST(
     }
 
     // =====================================================
-    // 2. GET UPLOADED FILE
+    // 2. RESUME UPLOAD RATE LIMIT
+    // 5 uploads / 10 minutes / USER
+    // =====================================================
+
+    const {
+      success: uploadAllowed,
+      limit,
+      remaining,
+      reset,
+    } =
+      await resumeUploadRateLimit.limit(
+        session.user.id,
+      );
+
+    const rateLimitHeaders = {
+      "X-RateLimit-Limit":
+        String(limit),
+
+      "X-RateLimit-Remaining":
+        String(remaining),
+
+      "X-RateLimit-Reset":
+        String(reset),
+    };
+
+    if (!uploadAllowed) {
+      const retryAfter =
+        Math.max(
+          1,
+          Math.ceil(
+            (reset -
+              Date.now()) /
+              1000,
+          ),
+        );
+
+      return NextResponse.json(
+        {
+          error:
+            "Too many resume uploads. Please try again later.",
+        },
+        {
+          status: 429,
+          headers: {
+            ...rateLimitHeaders,
+
+            "Retry-After":
+              String(
+                retryAfter,
+              ),
+          },
+        },
+      );
+    }
+
+    // =====================================================
+    // 3. GET UPLOADED FILE
     // =====================================================
 
     const formData =
       await request.formData();
 
-    const file = formData.get("file");
+    const file =
+      formData.get("file");
 
-    if (!(file instanceof File)) {
+    if (
+      !(file instanceof File)
+    ) {
       return NextResponse.json(
         {
-          error: "No file uploaded.",
+          error:
+            "No file uploaded.",
         },
         {
           status: 400,
@@ -174,7 +254,7 @@ export async function POST(
     }
 
     // =====================================================
-    // 3. FILE SIZE
+    // 4. FILE SIZE VALIDATION
     // =====================================================
 
     if (file.size === 0) {
@@ -189,7 +269,10 @@ export async function POST(
       );
     }
 
-    if (file.size > MAX_FILE_SIZE) {
+    if (
+      file.size >
+      MAX_FILE_SIZE
+    ) {
       return NextResponse.json(
         {
           error:
@@ -202,7 +285,7 @@ export async function POST(
     }
 
     // =====================================================
-    // 4. FILE TYPE
+    // 5. MIME TYPE VALIDATION
     // =====================================================
 
     if (
@@ -221,13 +304,15 @@ export async function POST(
     }
 
     // =====================================================
-    // 5. READ FILE
+    // 6. READ FILE
     // =====================================================
 
     const buffer =
       await file.arrayBuffer();
 
-    if (buffer.byteLength === 0) {
+    if (
+      buffer.byteLength === 0
+    ) {
       return NextResponse.json(
         {
           error:
@@ -240,7 +325,7 @@ export async function POST(
     }
 
     // =====================================================
-    // 6. VERIFY FILE SIGNATURE
+    // 7. FILE SIGNATURE VALIDATION
     // =====================================================
 
     if (
@@ -274,18 +359,25 @@ export async function POST(
     }
 
     // =====================================================
-    // 7. EXTRACT TEXT
+    // 8. EXTRACT TEXT
     // =====================================================
 
     let rawText = "";
 
     try {
-      if (file.type === PDF_TYPE) {
+      if (
+        file.type ===
+        PDF_TYPE
+      ) {
         rawText =
-          await extractPdfText(buffer);
+          await extractPdfText(
+            buffer,
+          );
       } else {
         rawText =
-          await extractDocxText(buffer);
+          await extractDocxText(
+            buffer,
+          );
       }
     } catch (error) {
       console.error(
@@ -305,7 +397,7 @@ export async function POST(
     }
 
     // =====================================================
-    // 8. TEXT VALIDATION
+    // 9. EXTRACTED TEXT VALIDATION
     // =====================================================
 
     if (!rawText) {
@@ -321,7 +413,8 @@ export async function POST(
     }
 
     if (
-      rawText.length > MAX_TEXT_LENGTH
+      rawText.length >
+      MAX_TEXT_LENGTH
     ) {
       return NextResponse.json(
         {
@@ -335,11 +428,13 @@ export async function POST(
     }
 
     // =====================================================
-    // 9. BASE64
+    // 10. CONVERT FILE TO BASE64
     // =====================================================
 
     const fileData =
-      arrayBufferToBase64(buffer);
+      arrayBufferToBase64(
+        buffer,
+      );
 
     if (!fileData) {
       return NextResponse.json(
@@ -354,14 +449,16 @@ export async function POST(
     }
 
     // =====================================================
-    // 10. SAFE FILE NAME
+    // 11. SANITIZE FILE NAME
     // =====================================================
 
     const safeFileName =
-      sanitizeFileName(file.name);
+      sanitizeFileName(
+        file.name,
+      );
 
     // =====================================================
-    // 11. SAVE TO DATABASE
+    // 12. SAVE RESUME TO DATABASE
     // =====================================================
 
     const [resume] =
@@ -386,30 +483,37 @@ export async function POST(
         });
 
     // =====================================================
-    // 12. RETURN SUCCESS
+    // 13. RETURN SUCCESS
     // =====================================================
 
-    return NextResponse.json({
-      success: true,
+    return NextResponse.json(
+      {
+        success: true,
 
-      resumeId:
-        resume.id,
+        resumeId:
+          resume.id,
 
-      fileName:
-        safeFileName,
+        fileName:
+          safeFileName,
 
-      fileType:
-        file.type,
+        fileType:
+          file.type,
 
-      fileSize:
-        file.size,
+        fileSize:
+          file.size,
 
-      textLength:
-        rawText.length,
+        textLength:
+          rawText.length,
 
-      message:
-        "Resume uploaded and processed successfully!",
-    });
+        message:
+          "Resume uploaded and processed successfully!",
+      },
+      {
+        status: 200,
+        headers:
+          rateLimitHeaders,
+      },
+    );
   } catch (error) {
     console.error(
       "Resume processing error:",
