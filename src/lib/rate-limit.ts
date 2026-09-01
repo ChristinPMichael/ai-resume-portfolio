@@ -4,7 +4,7 @@ import { Ratelimit } from "@upstash/ratelimit";
 const redis = Redis.fromEnv();
 
 // =========================================================
-// CONTACT FORM
+// CONTACT
 // 5 requests / 10 minutes / IP
 // =========================================================
 
@@ -37,4 +37,22 @@ export const resumeUploadRateLimit =
     analytics: true,
     prefix:
       "ai-portfolio:resume-upload",
+  });
+
+// =========================================================
+// AI RESUME ANALYSIS
+// 5 analyses / 10 minutes / USER
+// =========================================================
+
+export const resumeAnalysisRateLimit =
+  new Ratelimit({
+    redis,
+    limiter:
+      Ratelimit.slidingWindow(
+        5,
+        "10 m",
+      ),
+    analytics: true,
+    prefix:
+      "ai-portfolio:resume-analysis",
   });

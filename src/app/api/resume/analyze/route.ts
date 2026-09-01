@@ -15,17 +15,22 @@ import {
 import { eq, and } from "drizzle-orm";
 import { GoogleGenAI, Type } from "@google/genai";
 
+import {
+  resumeAnalysisRateLimit,
+} from "@/lib/rate-limit";
+
 export const runtime = "nodejs";
 
 /* =========================================================
    GEMINI
 ========================================================= */
 
-const apiKey = process.env.GEMINI_API_KEY;
+const apiKey =
+  process.env.GEMINI_API_KEY;
 
 if (!apiKey) {
   throw new Error(
-    "GEMINI_API_KEY is missing from .env.local",
+    "GEMINI_API_KEY is missing.",
   );
 }
 
@@ -196,7 +201,10 @@ const responseSchema = {
           },
         },
 
-        required: ["company", "role"],
+        required: [
+          "company",
+          "role",
+        ],
       },
     },
 
@@ -252,19 +260,25 @@ function cleanText(
   value: unknown,
   maxLength = 5000,
 ): string | null {
-  if (typeof value !== "string") {
+  if (
+    typeof value !== "string"
+  ) {
     return null;
   }
 
-  const cleaned = value
-    .replace(/\s+/g, " ")
-    .trim();
+  const cleaned =
+    value
+      .replace(/\s+/g, " ")
+      .trim();
 
   if (!cleaned) {
     return null;
   }
 
-  return cleaned.slice(0, maxLength);
+  return cleaned.slice(
+    0,
+    maxLength,
+  );
 }
 
 /* =========================================================
@@ -275,7 +289,10 @@ function cleanShortText(
   value: unknown,
   maxLength: number,
 ): string | null {
-  return cleanText(value, maxLength);
+  return cleanText(
+    value,
+    maxLength,
+  );
 }
 
 /* =========================================================
@@ -292,7 +309,8 @@ function cleanDate(
     return null;
   }
 
-  const text = String(value).trim();
+  const text =
+    String(value).trim();
 
   if (!text) {
     return null;
@@ -306,17 +324,19 @@ function cleanDate(
     return "Present";
   }
 
-  const monthYear = text.match(
-    /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{4}\b/i,
-  );
+  const monthYear =
+    text.match(
+      /\b(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)\s+\d{4}\b/i,
+    );
 
   if (monthYear) {
     return monthYear[0];
   }
 
-  const year = text.match(
-    /\b(19|20)\d{2}\b/,
-  );
+  const year =
+    text.match(
+      /\b(19|20)\d{2}\b/,
+    );
 
   if (year) {
     return year[0];
@@ -339,21 +359,24 @@ function cleanYear(
     return null;
   }
 
-  const text = String(value).trim();
+  const text =
+    String(value).trim();
 
   if (!text) {
     return null;
   }
 
-  const match = text.match(
-    /\b(19|20)\d{2}\b/,
-  );
+  const match =
+    text.match(
+      /\b(19|20)\d{2}\b/,
+    );
 
   if (!match) {
     return null;
   }
 
-  const year = Number(match[0]);
+  const year =
+    Number(match[0]);
 
   if (
     !Number.isInteger(year) ||
@@ -373,21 +396,31 @@ function cleanYear(
 function cleanUrl(
   value: unknown,
 ): string | null {
-  if (typeof value !== "string") {
+  if (
+    typeof value !== "string"
+  ) {
     return null;
   }
 
-  const text = value.trim();
+  const text =
+    value.trim();
 
   if (!text) {
     return null;
   }
 
   if (
-    text.startsWith("https://") ||
-    text.startsWith("http://")
+    text.startsWith(
+      "https://",
+    ) ||
+    text.startsWith(
+      "http://",
+    )
   ) {
-    return text.slice(0, 500);
+    return text.slice(
+      0,
+      500,
+    );
   }
 
   return null;
@@ -433,7 +466,7 @@ async function requestGemini(
 }
 
 /* =========================================================
-   GEMINI WITH FAST FALLBACK
+   GEMINI WITH FALLBACK
 ========================================================= */
 
 async function generateResumeAnalysis(
@@ -475,34 +508,22 @@ async function generateResumeAnalysis(
       status === 429
     ) {
       console.log(
-        `Switching immediately from ${primaryModel} to ${fallbackModel}...`,
+        `Switching from ${primaryModel} to ${fallbackModel}...`,
       );
-
-      try {
-        return await requestGemini(
-          fallbackModel,
-          prompt,
-        );
-      } catch (fallbackError: unknown) {
-        console.error(
-          `Gemini ${fallbackModel} failed:`,
-          fallbackError,
-        );
-
-        throw fallbackError;
-      }
+    } else {
+      console.log(
+        `Primary model failed. Trying ${fallbackModel}...`,
+      );
     }
-
-    console.log(
-      `Primary model failed. Trying ${fallbackModel}...`,
-    );
 
     try {
       return await requestGemini(
         fallbackModel,
         prompt,
       );
-    } catch (fallbackError: unknown) {
+    } catch (
+      fallbackError: unknown
+    ) {
       console.error(
         `Gemini ${fallbackModel} failed:`,
         fallbackError,
@@ -577,7 +598,8 @@ export async function POST(
     if (!session) {
       return NextResponse.json(
         {
-          error: "Unauthorized",
+          error:
+            "Unauthorized",
         },
         {
           status: 401,
@@ -586,20 +608,97 @@ export async function POST(
     }
 
     /* =====================================================
-       2. GET RESUME ID
+       2. AI ANALYSIS RATE LIMIT
+       5 analyses / 10 minutes / USER
     ===================================================== */
 
-    const body =
-      await request.json();
+    const {
+      success: analysisAllowed,
+      limit,
+      remaining,
+      reset,
+    } =
+      await resumeAnalysisRateLimit.limit(
+        session.user.id,
+      );
+
+    const rateLimitHeaders = {
+      "X-RateLimit-Limit":
+        String(limit),
+
+      "X-RateLimit-Remaining":
+        String(remaining),
+
+      "X-RateLimit-Reset":
+        String(reset),
+    };
+
+    if (!analysisAllowed) {
+      const retryAfter =
+        Math.max(
+          1,
+          Math.ceil(
+            (reset -
+              Date.now()) /
+              1000,
+          ),
+        );
+
+      return NextResponse.json(
+        {
+          error:
+            "Too many AI resume analyses. Please try again later.",
+        },
+        {
+          status: 429,
+
+          headers: {
+            ...rateLimitHeaders,
+
+            "Retry-After":
+              String(
+                retryAfter,
+              ),
+          },
+        },
+      );
+    }
+
+    /* =====================================================
+       3. GET RESUME ID
+    ===================================================== */
+
+    let body: {
+      resumeId?: unknown;
+    };
+
+    try {
+      body =
+        await request.json();
+    } catch {
+      return NextResponse.json(
+        {
+          error:
+            "Invalid JSON request.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
 
     const resumeId =
       body?.resumeId;
 
-    if (!resumeId) {
+    if (
+      typeof resumeId !==
+        "string" ||
+      !resumeId.trim()
+    ) {
       return NextResponse.json(
         {
           error:
-            "resumeId is required",
+            "resumeId is required.",
         },
         {
           status: 400,
@@ -608,7 +707,7 @@ export async function POST(
     }
 
     /* =====================================================
-       3. GET RESUME
+       4. GET USER'S RESUME
     ===================================================== */
 
     const [resume] =
@@ -619,7 +718,7 @@ export async function POST(
           and(
             eq(
               resumes.id,
-              resumeId,
+              resumeId.trim(),
             ),
 
             eq(
@@ -634,7 +733,7 @@ export async function POST(
       return NextResponse.json(
         {
           error:
-            "Resume not found",
+            "Resume not found.",
         },
         {
           status: 404,
@@ -646,7 +745,7 @@ export async function POST(
       return NextResponse.json(
         {
           error:
-            "Resume has no extracted text",
+            "Resume has no extracted text.",
         },
         {
           status: 400,
@@ -655,7 +754,7 @@ export async function POST(
     }
 
     /* =====================================================
-       4. GEMINI PROMPT
+       5. GEMINI PROMPT
     ===================================================== */
 
     const prompt = `
@@ -739,7 +838,7 @@ ${resume.rawText}
 `;
 
     /* =====================================================
-       5. GEMINI
+       6. GEMINI
     ===================================================== */
 
     const response =
@@ -749,12 +848,12 @@ ${resume.rawText}
 
     if (!response.text) {
       throw new Error(
-        "Gemini returned an empty response",
+        "Gemini returned an empty response.",
       );
     }
 
     /* =====================================================
-       6. PARSE JSON
+       7. PARSE JSON
     ===================================================== */
 
     let profile: Record<
@@ -764,14 +863,18 @@ ${resume.rawText}
 
     try {
       const parsed =
-        JSON.parse(response.text);
+        JSON.parse(
+          response.text,
+        );
 
       if (
-        typeof parsed !== "object" ||
-        parsed === null
+        typeof parsed !==
+          "object" ||
+        parsed === null ||
+        Array.isArray(parsed)
       ) {
         throw new Error(
-          "Gemini returned invalid object",
+          "Gemini returned an invalid object.",
         );
       }
 
@@ -780,289 +883,274 @@ ${resume.rawText}
           string,
           unknown
         >;
-    } catch (error: unknown) {
+    } catch {
       console.error(
         "Invalid Gemini JSON:",
         response.text,
       );
 
       throw new Error(
-        "Gemini returned invalid JSON",
+        "Gemini returned invalid JSON.",
       );
     }
 
     /* =====================================================
-       7. CLEAN PROFILE
+       8. CLEAN PROFILE
     ===================================================== */
 
-    const cleanProfile: CleanProfile = {
-      fullName:
-        cleanShortText(
-          profile?.fullName,
-          255,
-        ),
+    const cleanProfile: CleanProfile =
+      {
+        fullName:
+          cleanShortText(
+            profile?.fullName,
+            255,
+          ),
 
-      headline:
-        cleanShortText(
-          profile?.headline,
-          255,
-        ),
+        headline:
+          cleanShortText(
+            profile?.headline,
+            255,
+          ),
 
-      bio:
-        cleanText(
-          profile?.bio,
-          5000,
-        ),
+        bio:
+          cleanText(
+            profile?.bio,
+            5000,
+          ),
 
-      location:
-        cleanShortText(
-          profile?.location,
-          255,
-        ),
+        location:
+          cleanShortText(
+            profile?.location,
+            255,
+          ),
 
-      githubUrl:
-        cleanUrl(
-          profile?.githubUrl,
-        ),
+        githubUrl:
+          cleanUrl(
+            profile?.githubUrl,
+          ),
 
-      linkedinUrl:
-        cleanUrl(
-          profile?.linkedinUrl,
-        ),
+        linkedinUrl:
+          cleanUrl(
+            profile?.linkedinUrl,
+          ),
 
-      websiteUrl:
-        cleanUrl(
-          profile?.websiteUrl,
-        ),
+        websiteUrl:
+          cleanUrl(
+            profile?.websiteUrl,
+          ),
 
-      /* ===================================================
-         SKILLS
-      =================================================== */
+        skills:
+          Array.isArray(
+            profile?.skills,
+          )
+            ? profile.skills
+                .map(
+                  (
+                    skill: unknown,
+                  ): CleanSkill => {
+                    const data =
+                      skill as Record<
+                        string,
+                        unknown
+                      >;
 
-      skills:
-        Array.isArray(
-          profile?.skills,
-        )
-          ? profile.skills
-              .map(
-                (
-                  skill: unknown,
-                ): CleanSkill => {
-                  const data =
-                    skill as Record<
-                      string,
-                      unknown
-                    >;
+                    return {
+                      name:
+                        cleanShortText(
+                          data?.name,
+                          100,
+                        ),
 
-                  return {
-                    name:
-                      cleanShortText(
-                        data?.name,
-                        100,
-                      ),
+                      category:
+                        cleanShortText(
+                          data?.category,
+                          100,
+                        ),
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    skill: CleanSkill,
+                  ) =>
+                    Boolean(
+                      skill.name,
+                    ),
+                )
+            : [],
 
-                    category:
-                      cleanShortText(
-                        data?.category,
-                        100,
-                      ),
-                  };
-                },
-              )
-              .filter(
-                (
-                  skill: CleanSkill,
-                ) =>
-                  Boolean(
-                    skill.name,
-                  ),
-              )
-          : [],
+        projects:
+          Array.isArray(
+            profile?.projects,
+          )
+            ? profile.projects
+                .map(
+                  (
+                    project: unknown,
+                  ): CleanProject => {
+                    const data =
+                      project as Record<
+                        string,
+                        unknown
+                      >;
 
-      /* ===================================================
-         PROJECTS
-      =================================================== */
+                    return {
+                      name:
+                        cleanShortText(
+                          data?.name,
+                          255,
+                        ),
 
-      projects:
-        Array.isArray(
-          profile?.projects,
-        )
-          ? profile.projects
-              .map(
-                (
-                  project: unknown,
-                ): CleanProject => {
-                  const data =
-                    project as Record<
-                      string,
-                      unknown
-                    >;
+                      description:
+                        cleanText(
+                          data?.description,
+                          5000,
+                        ),
 
-                  return {
-                    name:
-                      cleanShortText(
-                        data?.name,
-                        255,
-                      ),
+                      technologies:
+                        cleanText(
+                          data?.technologies,
+                          1000,
+                        ),
 
-                    description:
-                      cleanText(
-                        data?.description,
-                        5000,
-                      ),
+                      projectUrl:
+                        cleanUrl(
+                          data?.projectUrl,
+                        ),
 
-                    technologies:
-                      cleanText(
-                        data?.technologies,
-                        1000,
-                      ),
+                      githubUrl:
+                        cleanUrl(
+                          data?.githubUrl,
+                        ),
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    project: CleanProject,
+                  ) =>
+                    Boolean(
+                      project.name,
+                    ),
+                )
+            : [],
 
-                    projectUrl:
-                      cleanUrl(
-                        data?.projectUrl,
-                      ),
+        experiences:
+          Array.isArray(
+            profile?.experiences,
+          )
+            ? profile.experiences
+                .map(
+                  (
+                    experience: unknown,
+                  ): CleanExperience => {
+                    const data =
+                      experience as Record<
+                        string,
+                        unknown
+                      >;
 
-                    githubUrl:
-                      cleanUrl(
-                        data?.githubUrl,
-                      ),
-                  };
-                },
-              )
-              .filter(
-                (
-                  project: CleanProject,
-                ) =>
-                  Boolean(
-                    project.name,
-                  ),
-              )
-          : [],
+                    return {
+                      company:
+                        cleanShortText(
+                          data?.company,
+                          255,
+                        ),
 
-      /* ===================================================
-         EXPERIENCE
-      =================================================== */
+                      role:
+                        cleanShortText(
+                          data?.role,
+                          255,
+                        ),
 
-      experiences:
-        Array.isArray(
-          profile?.experiences,
-        )
-          ? profile.experiences
-              .map(
-                (
-                  experience: unknown,
-                ): CleanExperience => {
-                  const data =
-                    experience as Record<
-                      string,
-                      unknown
-                    >;
+                      description:
+                        cleanText(
+                          data?.description,
+                          5000,
+                        ),
 
-                  return {
-                    company:
-                      cleanShortText(
-                        data?.company,
-                        255,
-                      ),
+                      startDate:
+                        cleanDate(
+                          data?.startDate,
+                        ),
 
-                    role:
-                      cleanShortText(
-                        data?.role,
-                        255,
-                      ),
+                      endDate:
+                        cleanDate(
+                          data?.endDate,
+                        ),
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    experience: CleanExperience,
+                  ) =>
+                    Boolean(
+                      experience.company &&
+                        experience.role,
+                    ),
+                )
+            : [],
 
-                    description:
-                      cleanText(
-                        data?.description,
-                        5000,
-                      ),
+        education:
+          Array.isArray(
+            profile?.education,
+          )
+            ? profile.education
+                .map(
+                  (
+                    item: unknown,
+                  ): CleanEducation => {
+                    const data =
+                      item as Record<
+                        string,
+                        unknown
+                      >;
 
-                    startDate:
-                      cleanDate(
-                        data?.startDate,
-                      ),
+                    return {
+                      institution:
+                        cleanShortText(
+                          data?.institution,
+                          255,
+                        ),
 
-                    endDate:
-                      cleanDate(
-                        data?.endDate,
-                      ),
-                  };
-                },
-              )
-              .filter(
-                (
-                  experience: CleanExperience,
-                ) =>
-                  Boolean(
-                    experience.company &&
-                      experience.role,
-                  ),
-              )
-          : [],
+                      degree:
+                        cleanShortText(
+                          data?.degree,
+                          255,
+                        ),
 
-      /* ===================================================
-         EDUCATION
-      =================================================== */
+                      fieldOfStudy:
+                        cleanShortText(
+                          data?.fieldOfStudy,
+                          255,
+                        ),
 
-      education:
-        Array.isArray(
-          profile?.education,
-        )
-          ? profile.education
-              .map(
-                (
-                  item: unknown,
-                ): CleanEducation => {
-                  const data =
-                    item as Record<
-                      string,
-                      unknown
-                    >;
+                      startYear:
+                        cleanYear(
+                          data?.startYear,
+                        ),
 
-                  return {
-                    institution:
-                      cleanShortText(
-                        data?.institution,
-                        255,
-                      ),
-
-                    degree:
-                      cleanShortText(
-                        data?.degree,
-                        255,
-                      ),
-
-                    fieldOfStudy:
-                      cleanShortText(
-                        data?.fieldOfStudy,
-                        255,
-                      ),
-
-                    startYear:
-                      cleanYear(
-                        data?.startYear,
-                      ),
-
-                    endYear:
-                      cleanYear(
-                        data?.endYear,
-                      ),
-                  };
-                },
-              )
-              .filter(
-                (
-                  item: CleanEducation,
-                ) =>
-                  Boolean(
-                    item.institution,
-                  ),
-              )
-          : [],
-    };
+                      endYear:
+                        cleanYear(
+                          data?.endYear,
+                        ),
+                    };
+                  },
+                )
+                .filter(
+                  (
+                    item: CleanEducation,
+                  ) =>
+                    Boolean(
+                      item.institution,
+                    ),
+                )
+            : [],
+      };
 
     /* =====================================================
-       8. USERNAME
+       9. USERNAME
     ===================================================== */
 
     const baseUsername =
@@ -1080,7 +1168,10 @@ ${resume.rawText}
           /^-|-$/g,
           "",
         )
-        .slice(0, 80);
+        .slice(
+          0,
+          80,
+        );
 
     const username =
       `${baseUsername}-${session.user.id.slice(
@@ -1089,10 +1180,12 @@ ${resume.rawText}
       )}`;
 
     /* =====================================================
-       9. FIND EXISTING PORTFOLIO
+       10. FIND EXISTING PORTFOLIO
     ===================================================== */
 
-    const [existingPortfolio] =
+    const [
+      existingPortfolio,
+    ] =
       await db
         .select({
           id:
@@ -1113,7 +1206,7 @@ ${resume.rawText}
         .limit(1);
 
     /* =====================================================
-       10. CREATE OR UPDATE PORTFOLIO
+       11. CREATE OR UPDATE PORTFOLIO
     ===================================================== */
 
     let portfolio: {
@@ -1121,7 +1214,9 @@ ${resume.rawText}
       username: string;
     };
 
-    if (existingPortfolio) {
+    if (
+      existingPortfolio
+    ) {
       console.log(
         `Updating existing portfolio: ${existingPortfolio.id}`,
       );
@@ -1172,9 +1267,11 @@ ${resume.rawText}
             portfolioProfiles.username,
         });
 
-      if (!updatedPortfolio) {
+      if (
+        !updatedPortfolio
+      ) {
         throw new Error(
-          "Failed to update portfolio profile",
+          "Failed to update portfolio profile.",
         );
       }
 
@@ -1230,9 +1327,11 @@ ${resume.rawText}
               portfolioProfiles.username,
           });
 
-      if (!newPortfolio) {
+      if (
+        !newPortfolio
+      ) {
         throw new Error(
-          "Failed to create portfolio profile",
+          "Failed to create portfolio profile.",
         );
       }
 
@@ -1241,7 +1340,7 @@ ${resume.rawText}
     }
 
     /* =====================================================
-       11. SAVE SKILLS
+       12. SAVE SKILLS
     ===================================================== */
 
     if (
@@ -1269,7 +1368,7 @@ ${resume.rawText}
     }
 
     /* =====================================================
-       12. SAVE PROJECTS
+       13. SAVE PROJECTS
     ===================================================== */
 
     if (
@@ -1306,12 +1405,12 @@ ${resume.rawText}
     }
 
     /* =====================================================
-       13. SAVE EXPERIENCE
+       14. SAVE EXPERIENCE
     ===================================================== */
 
     if (
-      cleanProfile.experiences.length >
-      0
+      cleanProfile.experiences
+        .length > 0
     ) {
       await db
         .insert(experiences)
@@ -1343,7 +1442,7 @@ ${resume.rawText}
     }
 
     /* =====================================================
-       14. SAVE EDUCATION
+       15. SAVE EDUCATION
     ===================================================== */
 
     if (
@@ -1380,25 +1479,35 @@ ${resume.rawText}
     }
 
     /* =====================================================
-       15. SUCCESS
+       16. SUCCESS
     ===================================================== */
 
-    return NextResponse.json({
-      success: true,
+    return NextResponse.json(
+      {
+        success: true,
 
-      portfolioId:
-        portfolio.id,
+        portfolioId:
+          portfolio.id,
 
-      username:
-        portfolio.username,
+        username:
+          portfolio.username,
 
-      profile:
-        cleanProfile,
+        profile:
+          cleanProfile,
 
-      message:
-        "AI portfolio generated successfully!",
-    });
-  } catch (error: unknown) {
+        message:
+          "AI portfolio generated successfully!",
+      },
+      {
+        status: 200,
+
+        headers:
+          rateLimitHeaders,
+      },
+    );
+  } catch (
+    error: unknown
+  ) {
     console.error(
       "Resume AI analysis error:",
       error,
@@ -1409,7 +1518,7 @@ ${resume.rawText}
         error:
           error instanceof Error
             ? error.message
-            : "Failed to analyze resume",
+            : "Failed to analyze resume.",
       },
       {
         status: 500,
