@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
+import { revalidateTag } from "next/cache";
+import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-
 import { db } from "@/db";
 
 import {
@@ -10,11 +11,55 @@ import {
   projects,
 } from "@/db/schema";
 
-import { eq, and } from "drizzle-orm";
-
-import { revalidateTag } from "next/cache";
-
 export const runtime = "nodejs";
+
+function isValidOptionalUrl(value: string): boolean {
+  if (!value) return true;
+
+  try {
+    const url = new URL(value);
+
+    return (
+      url.protocol === "http:" ||
+      url.protocol === "https:"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function validateProjectUrls(
+  projectUrl: string,
+  githubUrl: string,
+) {
+  if (!isValidOptionalUrl(projectUrl)) {
+    return "Project URL must be a valid HTTP or HTTPS URL.";
+  }
+
+  if (!isValidOptionalUrl(githubUrl)) {
+    return "GitHub URL must be a valid HTTP or HTTPS URL.";
+  }
+
+  return null;
+}
+
+async function getUserPortfolio(userId: string) {
+  const [portfolio] = await db
+    .select({
+      id: portfolioProfiles.id,
+      username: portfolioProfiles.username,
+    })
+    .from(portfolioProfiles)
+    .where(
+      eq(
+        portfolioProfiles.userId,
+        userId,
+      ),
+    )
+    .limit(1);
+
+  return portfolio;
+}
 
 export async function POST(request: Request) {
   try {
@@ -32,11 +77,34 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================================
+    // FORM DATA
+    // =====================================================
+
     const formData = await request.formData();
 
     const action = String(
       formData.get("action") || "add",
     ).trim();
+
+    // =====================================================
+    // GET USER PORTFOLIO
+    // =====================================================
+
+    const portfolio = await getUserPortfolio(
+      session.user.id,
+    );
+
+    if (!portfolio) {
+      return NextResponse.json(
+        {
+          error: "Portfolio not found.",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
 
     // =====================================================
     // DELETE
@@ -58,37 +126,7 @@ export async function POST(request: Request) {
         );
       }
 
-      // Find the current user's portfolio
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
-
-      if (!portfolio) {
-        return NextResponse.json(
-          {
-            error:
-              "Portfolio not found.",
-          },
-          {
-            status: 404,
-          },
-        );
-      }
-
-      // Delete only a project belonging
-      // to the user's portfolio
-      await db
+      const [deletedProject] = await db
         .delete(projects)
         .where(
           and(
@@ -98,9 +136,22 @@ export async function POST(request: Request) {
               portfolio.id,
             ),
           ),
-        );
+        )
+        .returning({
+          id: projects.id,
+        });
 
-      // Invalidate public portfolio cache
+      if (!deletedProject) {
+        return NextResponse.json(
+          {
+            error: "Project not found.",
+          },
+          {
+            status: 404,
+          },
+        );
+      }
+
       revalidateTag(
         `portfolio:${portfolio.username}`,
         "max",
@@ -156,7 +207,7 @@ export async function POST(request: Request) {
       }
 
       // ===================================================
-      // VALIDATION
+      // LENGTH VALIDATION
       // ===================================================
 
       if (name.length > 255) {
@@ -164,6 +215,30 @@ export async function POST(request: Request) {
           {
             error:
               "Project name is too long.",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      if (description.length > 10000) {
+        return NextResponse.json(
+          {
+            error:
+              "Project description is too long.",
+          },
+          {
+            status: 400,
+          },
+        );
+      }
+
+      if (technologies.length > 2000) {
+        return NextResponse.json(
+          {
+            error:
+              "Technologies field is too long.",
           },
           {
             status: 400,
@@ -196,32 +271,21 @@ export async function POST(request: Request) {
       }
 
       // ===================================================
-      // VERIFY PORTFOLIO OWNERSHIP
+      // URL VALIDATION
       // ===================================================
 
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
+      const urlError = validateProjectUrls(
+        projectUrl,
+        githubUrl,
+      );
 
-      if (!portfolio) {
+      if (urlError) {
         return NextResponse.json(
           {
-            error:
-              "Portfolio not found.",
+            error: urlError,
           },
           {
-            status: 404,
+            status: 400,
           },
         );
       }
@@ -272,10 +336,6 @@ export async function POST(request: Request) {
         );
       }
 
-      // ===================================================
-      // INVALIDATE CACHE
-      // ===================================================
-
       revalidateTag(
         `portfolio:${portfolio.username}`,
         "max",
@@ -318,7 +378,7 @@ export async function POST(request: Request) {
     ).trim();
 
     // =====================================================
-    // VALIDATION
+    // REQUIRED FIELDS
     // =====================================================
 
     if (!portfolioId || !name) {
@@ -333,11 +393,39 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================================
+    // LENGTH VALIDATION
+    // =====================================================
+
     if (name.length > 255) {
       return NextResponse.json(
         {
           error:
             "Project name is too long.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (description.length > 10000) {
+      return NextResponse.json(
+        {
+          error:
+            "Project description is too long.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    if (technologies.length > 2000) {
+      return NextResponse.json(
+        {
+          error:
+            "Technologies field is too long.",
         },
         {
           status: 400,
@@ -370,38 +458,37 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
+    // URL VALIDATION
+    // =====================================================
+
+    const urlError = validateProjectUrls(
+      projectUrl,
+      githubUrl,
+    );
+
+    if (urlError) {
+      return NextResponse.json(
+        {
+          error: urlError,
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    // =====================================================
     // VERIFY PORTFOLIO OWNERSHIP
     // =====================================================
 
-    const [portfolio] = await db
-      .select({
-        id: portfolioProfiles.id,
-        username:
-          portfolioProfiles.username,
-      })
-      .from(portfolioProfiles)
-      .where(
-        and(
-          eq(
-            portfolioProfiles.id,
-            portfolioId,
-          ),
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        ),
-      )
-      .limit(1);
-
-    if (!portfolio) {
+    if (portfolio.id !== portfolioId) {
       return NextResponse.json(
         {
           error:
-            "Portfolio not found.",
+            "You do not have permission to modify this portfolio.",
         },
         {
-          status: 404,
+          status: 403,
         },
       );
     }
@@ -411,20 +498,14 @@ export async function POST(request: Request) {
     // =====================================================
 
     await db.insert(projects).values({
-      portfolioId:
-        portfolio.id,
-
+      portfolioId: portfolio.id,
       name,
-
       description:
         description || null,
-
       technologies:
         technologies || null,
-
       projectUrl:
         projectUrl || null,
-
       githubUrl:
         githubUrl || null,
     });
