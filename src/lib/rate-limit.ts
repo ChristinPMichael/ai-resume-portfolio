@@ -3,56 +3,86 @@ import { Ratelimit } from "@upstash/ratelimit";
 
 const redis = Redis.fromEnv();
 
-// =========================================================
-// CONTACT
-// 5 requests / 10 minutes / IP
-// =========================================================
+/* =========================================================
+   CONTACT — IP RATE LIMIT
+   5 requests / 10 minutes / IP
+========================================================= */
 
 export const contactRateLimit =
   new Ratelimit({
     redis,
+
     limiter:
       Ratelimit.slidingWindow(
         5,
         "10 m",
       ),
+
     analytics: true,
+
     prefix:
       "ai-portfolio:contact",
   });
 
-// =========================================================
-// RESUME UPLOAD
-// 5 uploads / 10 minutes / USER
-// =========================================================
+/* =========================================================
+   CONTACT — EMAIL RATE LIMIT
+   5 requests / 10 minutes / EMAIL
+========================================================= */
 
-export const resumeUploadRateLimit =
+export const contactEmailRateLimit =
   new Ratelimit({
     redis,
+
     limiter:
       Ratelimit.slidingWindow(
         5,
         "10 m",
       ),
+
     analytics: true,
+
     prefix:
-      "ai-portfolio:resume-upload",
+      "ai-portfolio:contact-email",
   });
 
-// =========================================================
-// AI RESUME ANALYSIS
-// 5 analyses / 10 minutes / USER
-// =========================================================
+/* =========================================================
+   RESUME ANALYSIS RATE LIMIT
+   10 requests / 10 minutes / USER
+========================================================= */
 
 export const resumeAnalysisRateLimit =
   new Ratelimit({
     redis,
+
+    limiter:
+      Ratelimit.slidingWindow(
+        10,
+        "10 m",
+      ),
+
+    analytics: true,
+
+    prefix:
+      "ai-portfolio:resume-analysis",
+  });
+
+/* =========================================================
+   RESUME UPLOAD RATE LIMIT
+   5 requests / 10 minutes / USER
+========================================================= */
+
+export const resumeUploadRateLimit =
+  new Ratelimit({
+    redis,
+
     limiter:
       Ratelimit.slidingWindow(
         5,
         "10 m",
       ),
+
     analytics: true,
+
     prefix:
-      "ai-portfolio:resume-analysis",
+      "ai-portfolio:resume-upload",
   });

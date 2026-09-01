@@ -9,31 +9,70 @@ import {
 
 import { eq } from "drizzle-orm";
 
-import { contactRateLimit } from "@/lib/rate-limit";
+import {
+  contactRateLimit,
+  contactEmailRateLimit,
+} from "@/lib/rate-limit";
 
 export const runtime = "nodejs";
 
-export async function POST(request: Request) {
+const MAX_USERNAME_LENGTH = 100;
+const MAX_NAME_LENGTH = 100;
+const MAX_EMAIL_LENGTH = 255;
+const MAX_MESSAGE_LENGTH = 5000;
+
+/* =========================================================
+   GET CLIENT IP
+========================================================= */
+
+function getClientIp(
+  request: Request,
+): string {
+  const forwardedFor =
+    request.headers.get(
+      "x-forwarded-for",
+    );
+
+  const realIp =
+    request.headers.get(
+      "x-real-ip",
+    );
+
+  if (forwardedFor) {
+    const firstIp =
+      forwardedFor
+        .split(",")[0]
+        ?.trim();
+
+    if (firstIp) {
+      return firstIp;
+    }
+  }
+
+  if (realIp?.trim()) {
+    return realIp.trim();
+  }
+
+  return "unknown";
+}
+
+/* =========================================================
+   POST
+========================================================= */
+
+export async function POST(
+  request: Request,
+) {
   try {
     // =====================================================
-    // GET CLIENT IP
+    // 1. CLIENT IP
     // =====================================================
-
-    const forwardedFor =
-      request.headers.get("x-forwarded-for");
-
-    const realIp =
-      request.headers.get("x-real-ip");
 
     const ip =
-      forwardedFor
-        ?.split(",")[0]
-        ?.trim() ||
-      realIp ||
-      "unknown";
+      getClientIp(request);
 
     // =====================================================
-    // READ FORM DATA
+    // 2. READ FORM DATA
     // =====================================================
 
     const formData =
@@ -41,46 +80,57 @@ export async function POST(request: Request) {
 
     const portfolioUsername =
       String(
-        formData.get("username") ?? "",
+        formData.get(
+          "username",
+        ) ?? "",
       ).trim();
 
     const name =
       String(
-        formData.get("name") ?? "",
+        formData.get("name") ??
+          "",
       ).trim();
 
     const email =
       String(
-        formData.get("email") ?? "",
+        formData.get(
+          "email",
+        ) ?? "",
       )
         .trim()
         .toLowerCase();
 
     const message =
       String(
-        formData.get("message") ?? "",
+        formData.get(
+          "message",
+        ) ?? "",
       ).trim();
 
     // =====================================================
-    // HONEYPOT SPAM PROTECTION
+    // 3. HONEYPOT
     // =====================================================
 
     const website =
       String(
-        formData.get("website") ?? "",
+        formData.get(
+          "website",
+        ) ?? "",
       ).trim();
 
     if (website) {
-      // Silently ignore obvious bots.
-      return NextResponse.json({
-        success: true,
-        message:
-          "Message sent successfully.",
-      });
+      // Silently accept obvious bots.
+      return NextResponse.json(
+        {
+          success: true,
+          message:
+            "Message sent successfully.",
+        },
+      );
     }
 
     // =====================================================
-    // BASIC VALIDATION
+    // 4. REQUIRED FIELDS
     // =====================================================
 
     if (
@@ -101,11 +151,12 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // LENGTH VALIDATION
+    // 5. LENGTH VALIDATION
     // =====================================================
 
     if (
-      portfolioUsername.length > 100
+      portfolioUsername.length >
+      MAX_USERNAME_LENGTH
     ) {
       return NextResponse.json(
         {
@@ -118,7 +169,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (name.length > 100) {
+    if (
+      name.length >
+      MAX_NAME_LENGTH
+    ) {
       return NextResponse.json(
         {
           error:
@@ -130,7 +184,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (email.length > 255) {
+    if (
+      email.length >
+      MAX_EMAIL_LENGTH
+    ) {
       return NextResponse.json(
         {
           error:
@@ -142,7 +199,10 @@ export async function POST(request: Request) {
       );
     }
 
-    if (message.length > 5000) {
+    if (
+      message.length >
+      MAX_MESSAGE_LENGTH
+    ) {
       return NextResponse.json(
         {
           error:
@@ -155,13 +215,15 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // EMAIL VALIDATION
+    // 6. EMAIL VALIDATION
     // =====================================================
 
     const emailPattern =
       /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-    if (!emailPattern.test(email)) {
+    if (
+      !emailPattern.test(email)
+    ) {
       return NextResponse.json(
         {
           error:
@@ -174,35 +236,39 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // RATE LIMIT
+    // 7. IP RATE LIMIT
     // 5 requests / 10 minutes / IP
     // =====================================================
 
     const {
-      success: allowed,
-      limit,
-      remaining,
-      reset,
+      success: ipAllowed,
+      limit: ipLimit,
+      remaining: ipRemaining,
+      reset: ipReset,
     } =
-      await contactRateLimit.limit(ip);
+      await contactRateLimit.limit(
+        ip,
+      );
 
-    const rateLimitHeaders = {
-      "X-RateLimit-Limit":
-        String(limit),
+    const ipRateLimitHeaders =
+      {
+        "X-RateLimit-Limit":
+          String(ipLimit),
 
-      "X-RateLimit-Remaining":
-        String(remaining),
+        "X-RateLimit-Remaining":
+          String(ipRemaining),
 
-      "X-RateLimit-Reset":
-        String(reset),
-    };
+        "X-RateLimit-Reset":
+          String(ipReset),
+      };
 
-    if (!allowed) {
+    if (!ipAllowed) {
       const retryAfter =
         Math.max(
           1,
           Math.ceil(
-            (reset - Date.now()) /
+            (ipReset -
+              Date.now()) /
               1000,
           ),
         );
@@ -214,25 +280,91 @@ export async function POST(request: Request) {
         },
         {
           status: 429,
+
           headers: {
-            ...rateLimitHeaders,
+            ...ipRateLimitHeaders,
+
             "Retry-After":
-              String(retryAfter),
+              String(
+                retryAfter,
+              ),
           },
         },
       );
     }
 
     // =====================================================
-    // FIND PORTFOLIO
+    // 8. EMAIL RATE LIMIT
+    // 5 requests / 10 minutes / EMAIL
+    // =====================================================
+
+    const {
+      success: emailAllowed,
+      limit: emailLimit,
+      remaining: emailRemaining,
+      reset: emailReset,
+    } =
+      await contactEmailRateLimit.limit(
+        email,
+      );
+
+    if (!emailAllowed) {
+      const retryAfter =
+        Math.max(
+          1,
+          Math.ceil(
+            (emailReset -
+              Date.now()) /
+              1000,
+          ),
+        );
+
+      return NextResponse.json(
+        {
+          error:
+            "Too many messages from this email address. Please try again later.",
+        },
+        {
+          status: 429,
+
+          headers: {
+            "X-RateLimit-Limit":
+              String(
+                emailLimit,
+              ),
+
+            "X-RateLimit-Remaining":
+              String(
+                emailRemaining,
+              ),
+
+            "X-RateLimit-Reset":
+              String(
+                emailReset,
+              ),
+
+            "Retry-After":
+              String(
+                retryAfter,
+              ),
+          },
+        },
+      );
+    }
+
+    // =====================================================
+    // 9. FIND PORTFOLIO
     // =====================================================
 
     const [portfolio] =
       await db
         .select({
-          id: portfolioProfiles.id,
+          id:
+            portfolioProfiles.id,
         })
-        .from(portfolioProfiles)
+        .from(
+          portfolioProfiles,
+        )
         .where(
           eq(
             portfolioProfiles.username,
@@ -254,11 +386,13 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // SAVE MESSAGE
+    // 10. SAVE MESSAGE
     // =====================================================
 
     await db
-      .insert(contactMessages)
+      .insert(
+        contactMessages,
+      )
       .values({
         portfolioId:
           portfolio.id,
@@ -271,7 +405,7 @@ export async function POST(request: Request) {
       });
 
     // =====================================================
-    // SUCCESS
+    // 11. SUCCESS
     // =====================================================
 
     return NextResponse.json(
@@ -281,13 +415,18 @@ export async function POST(request: Request) {
         message:
           "Message sent successfully.",
 
-        remaining,
+        remaining:
+          Math.min(
+            ipRemaining,
+            emailRemaining,
+          ),
       },
       {
         status: 200,
 
-        headers:
-          rateLimitHeaders,
+        headers: {
+          ...ipRateLimitHeaders,
+        },
       },
     );
   } catch (error) {
