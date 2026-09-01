@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
+import { revalidateTag } from "next/cache";
+import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-
 import { db } from "@/db";
 
 import {
@@ -10,16 +11,30 @@ import {
   skills,
 } from "@/db/schema";
 
-import { eq, and } from "drizzle-orm";
-
-import { revalidateTag } from "next/cache";
-
 export const runtime = "nodejs";
+
+async function getUserPortfolio(userId: string) {
+  const [portfolio] = await db
+    .select({
+      id: portfolioProfiles.id,
+      username: portfolioProfiles.username,
+    })
+    .from(portfolioProfiles)
+    .where(
+      eq(
+        portfolioProfiles.userId,
+        userId,
+      ),
+    )
+    .limit(1);
+
+  return portfolio;
+}
 
 export async function POST(request: Request) {
   try {
     // =====================================================
-    // 1. AUTHENTICATION
+    // AUTHENTICATION
     // =====================================================
 
     const session = await auth.api.getSession({
@@ -32,6 +47,10 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================================
+    // FORM DATA
+    // =====================================================
+
     const formData = await request.formData();
 
     const action = String(
@@ -39,7 +58,26 @@ export async function POST(request: Request) {
     ).trim();
 
     // =====================================================
-    // 2. DELETE SKILL
+    // FIND USER PORTFOLIO
+    // =====================================================
+
+    const portfolio = await getUserPortfolio(
+      session.user.id,
+    );
+
+    if (!portfolio) {
+      return NextResponse.json(
+        {
+          error: "Portfolio not found.",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    // =====================================================
+    // DELETE SKILL
     // =====================================================
 
     if (action === "delete") {
@@ -58,36 +96,7 @@ export async function POST(request: Request) {
         );
       }
 
-      // Find the user's portfolio
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
-
-      if (!portfolio) {
-        return NextResponse.json(
-          {
-            error:
-              "Portfolio not found.",
-          },
-          {
-            status: 404,
-          },
-        );
-      }
-
-      // Delete only the user's skill
-      await db
+      const [deletedSkill] = await db
         .delete(skills)
         .where(
           and(
@@ -97,9 +106,22 @@ export async function POST(request: Request) {
               portfolio.id,
             ),
           ),
-        );
+        )
+        .returning({
+          id: skills.id,
+        });
 
-      // Invalidate public portfolio cache
+      if (!deletedSkill) {
+        return NextResponse.json(
+          {
+            error: "Skill not found.",
+          },
+          {
+            status: 404,
+          },
+        );
+      }
+
       revalidateTag(
         `portfolio:${portfolio.username}`,
         "max",
@@ -114,7 +136,7 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // 3. ADD SKILL
+    // ADD SKILL
     // =====================================================
 
     const portfolioId = String(
@@ -130,7 +152,7 @@ export async function POST(request: Request) {
     ).trim();
 
     // =====================================================
-    // 4. VALIDATION
+    // VALIDATION
     // =====================================================
 
     if (!portfolioId || !name) {
@@ -170,58 +192,33 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // 5. VERIFY PORTFOLIO OWNERSHIP
+    // VERIFY PORTFOLIO OWNERSHIP
     // =====================================================
 
-    const [portfolio] = await db
-      .select({
-        id: portfolioProfiles.id,
-        username:
-          portfolioProfiles.username,
-      })
-      .from(portfolioProfiles)
-      .where(
-        and(
-          eq(
-            portfolioProfiles.id,
-            portfolioId,
-          ),
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        ),
-      )
-      .limit(1);
-
-    if (!portfolio) {
+    if (portfolio.id !== portfolioId) {
       return NextResponse.json(
         {
           error:
-            "Portfolio not found.",
+            "You do not have permission to modify this portfolio.",
         },
         {
-          status: 404,
+          status: 403,
         },
       );
     }
 
     // =====================================================
-    // 6. INSERT SKILL
+    // INSERT SKILL
     // =====================================================
 
     await db.insert(skills).values({
-      portfolioId:
-        portfolio.id,
-
+      portfolioId: portfolio.id,
       name,
-
-      category:
-        category || null,
+      category: category || null,
     });
 
     // =====================================================
-    // 7. INVALIDATE PUBLIC PORTFOLIO CACHE
+    // INVALIDATE PUBLIC PORTFOLIO CACHE
     // =====================================================
 
     revalidateTag(
@@ -230,7 +227,7 @@ export async function POST(request: Request) {
     );
 
     // =====================================================
-    // 8. REDIRECT
+    // REDIRECT
     // =====================================================
 
     return NextResponse.redirect(
@@ -247,8 +244,7 @@ export async function POST(request: Request) {
 
     return NextResponse.json(
       {
-        error:
-          "Failed to update skills.",
+        error: "Failed to update skills.",
       },
       {
         status: 500,
