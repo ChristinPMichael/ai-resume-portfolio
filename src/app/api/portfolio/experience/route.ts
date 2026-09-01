@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
+import { revalidateTag } from "next/cache";
+import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-
 import { db } from "@/db";
 
 import {
@@ -10,11 +11,37 @@ import {
   experiences,
 } from "@/db/schema";
 
-import { eq, and } from "drizzle-orm";
-
-import { revalidateTag } from "next/cache";
-
 export const runtime = "nodejs";
+
+async function getUserPortfolio(userId: string) {
+  const [portfolio] = await db
+    .select({
+      id: portfolioProfiles.id,
+      username: portfolioProfiles.username,
+    })
+    .from(portfolioProfiles)
+    .where(
+      eq(
+        portfolioProfiles.userId,
+        userId,
+      ),
+    )
+    .limit(1);
+
+  return portfolio;
+}
+
+function isValidDateValue(value: string): boolean {
+  if (!value) return true;
+
+  // Allows common values such as:
+  // 2024
+  // 2024-01
+  // Jan 2024
+  // Present
+  // Current
+  return value.length <= 50;
+}
 
 export async function POST(request: Request) {
   try {
@@ -32,11 +59,34 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================================
+    // FORM DATA
+    // =====================================================
+
     const formData = await request.formData();
 
     const action = String(
       formData.get("action") || "add",
     ).trim();
+
+    // =====================================================
+    // FIND USER PORTFOLIO
+    // =====================================================
+
+    const portfolio = await getUserPortfolio(
+      session.user.id,
+    );
+
+    if (!portfolio) {
+      return NextResponse.json(
+        {
+          error: "Portfolio not found.",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
 
     // =====================================================
     // DELETE
@@ -59,27 +109,30 @@ export async function POST(request: Request) {
         );
       }
 
-      // Find user's portfolio
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
+      const [deletedExperience] =
+        await db
+          .delete(experiences)
+          .where(
+            and(
+              eq(
+                experiences.id,
+                experienceId,
+              ),
+              eq(
+                experiences.portfolioId,
+                portfolio.id,
+              ),
+            ),
+          )
+          .returning({
+            id: experiences.id,
+          });
 
-      if (!portfolio) {
+      if (!deletedExperience) {
         return NextResponse.json(
           {
             error:
-              "Portfolio not found.",
+              "Experience not found.",
           },
           {
             status: 404,
@@ -87,23 +140,6 @@ export async function POST(request: Request) {
         );
       }
 
-      // Delete only user's experience
-      await db
-        .delete(experiences)
-        .where(
-          and(
-            eq(
-              experiences.id,
-              experienceId,
-            ),
-            eq(
-              experiences.portfolioId,
-              portfolio.id,
-            ),
-          ),
-        );
-
-      // Invalidate public portfolio cache
       revalidateTag(
         `portfolio:${portfolio.username}`,
         "max",
@@ -147,7 +183,7 @@ export async function POST(request: Request) {
       ).trim();
 
       // ===================================================
-      // VALIDATION
+      // REQUIRED FIELDS
       // ===================================================
 
       if (
@@ -165,6 +201,10 @@ export async function POST(request: Request) {
           },
         );
       }
+
+      // ===================================================
+      // LENGTH VALIDATION
+      // ===================================================
 
       if (company.length > 255) {
         return NextResponse.json(
@@ -190,11 +230,11 @@ export async function POST(request: Request) {
         );
       }
 
-      if (startDate.length > 50) {
+      if (description.length > 10000) {
         return NextResponse.json(
           {
             error:
-              "Start date is too long.",
+              "Experience description is too long.",
           },
           {
             status: 400,
@@ -202,45 +242,17 @@ export async function POST(request: Request) {
         );
       }
 
-      if (endDate.length > 50) {
+      if (
+        !isValidDateValue(startDate) ||
+        !isValidDateValue(endDate)
+      ) {
         return NextResponse.json(
           {
             error:
-              "End date is too long.",
+              "Invalid experience date.",
           },
           {
             status: 400,
-          },
-        );
-      }
-
-      // ===================================================
-      // FIND USER PORTFOLIO
-      // ===================================================
-
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
-
-      if (!portfolio) {
-        return NextResponse.json(
-          {
-            error:
-              "Portfolio not found.",
-          },
-          {
-            status: 404,
           },
         );
       }
@@ -290,10 +302,6 @@ export async function POST(request: Request) {
         );
       }
 
-      // ===================================================
-      // INVALIDATE CACHE
-      // ===================================================
-
       revalidateTag(
         `portfolio:${portfolio.username}`,
         "max",
@@ -336,7 +344,7 @@ export async function POST(request: Request) {
     ).trim();
 
     // =====================================================
-    // VALIDATION
+    // REQUIRED FIELDS
     // =====================================================
 
     if (
@@ -355,6 +363,10 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================================
+    // LENGTH VALIDATION
+    // =====================================================
+
     if (company.length > 255) {
       return NextResponse.json(
         {
@@ -370,8 +382,7 @@ export async function POST(request: Request) {
     if (role.length > 255) {
       return NextResponse.json(
         {
-          error:
-            "Role is too long.",
+          error: "Role is too long.",
         },
         {
           status: 400,
@@ -379,11 +390,11 @@ export async function POST(request: Request) {
       );
     }
 
-    if (startDate.length > 50) {
+    if (description.length > 10000) {
       return NextResponse.json(
         {
           error:
-            "Start date is too long.",
+            "Experience description is too long.",
         },
         {
           status: 400,
@@ -391,11 +402,14 @@ export async function POST(request: Request) {
       );
     }
 
-    if (endDate.length > 50) {
+    if (
+      !isValidDateValue(startDate) ||
+      !isValidDateValue(endDate)
+    ) {
       return NextResponse.json(
         {
           error:
-            "End date is too long.",
+            "Invalid experience date.",
         },
         {
           status: 400,
@@ -407,35 +421,14 @@ export async function POST(request: Request) {
     // VERIFY OWNERSHIP
     // =====================================================
 
-    const [portfolio] = await db
-      .select({
-        id: portfolioProfiles.id,
-        username:
-          portfolioProfiles.username,
-      })
-      .from(portfolioProfiles)
-      .where(
-        and(
-          eq(
-            portfolioProfiles.id,
-            portfolioId,
-          ),
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        ),
-      )
-      .limit(1);
-
-    if (!portfolio) {
+    if (portfolio.id !== portfolioId) {
       return NextResponse.json(
         {
           error:
-            "Portfolio not found.",
+            "You do not have permission to modify this portfolio.",
         },
         {
-          status: 404,
+          status: 403,
         },
       );
     }
@@ -445,19 +438,13 @@ export async function POST(request: Request) {
     // =====================================================
 
     await db.insert(experiences).values({
-      portfolioId:
-        portfolio.id,
-
+      portfolioId: portfolio.id,
       company,
-
       role,
-
       description:
         description || null,
-
       startDate:
         startDate || null,
-
       endDate:
         endDate || null,
     });
