@@ -37,21 +37,35 @@ const DOCX_TYPE =
 ========================================================= */
 
 async function extractPdfText(
-  buffer: ArrayBuffer,
+  fileBuffer: Buffer,
 ): Promise<string> {
   /*
    * IMPORTANT:
-   * PDF.js/unpdf may detach the ArrayBuffer that it receives.
    *
-   * Use a copy so the original upload buffer remains usable
-   * later when converting the file to Base64.
+   * Never give the original upload Buffer directly
+   * to the PDF processor.
+   *
+   * PDF.js/unpdf can detach the underlying ArrayBuffer.
+   * We therefore create a completely independent copy.
    */
 
-  const pdfBuffer = buffer.slice(0);
+  const pdfBuffer = Buffer.from(
+    fileBuffer,
+  );
+
+  /*
+   * Create an independent Uint8Array.
+   *
+   * Uint8Array.from() creates a new backing buffer,
+   * preventing PDF.js from detaching our original file.
+   */
+
+  const pdfBytes =
+    Uint8Array.from(pdfBuffer);
 
   const pdf =
     await getDocumentProxy(
-      new Uint8Array(pdfBuffer),
+      pdfBytes,
     );
 
   const { text } =
@@ -67,26 +81,22 @@ async function extractPdfText(
 ========================================================= */
 
 async function extractDocxText(
-  buffer: ArrayBuffer,
+  fileBuffer: Buffer,
 ): Promise<string> {
+  /*
+   * Give Mammoth its own Buffer copy as well.
+   */
+
+  const docxBuffer = Buffer.from(
+    fileBuffer,
+  );
+
   const result =
     await mammoth.extractRawText({
-      buffer: Buffer.from(buffer),
+      buffer: docxBuffer,
     });
 
   return result.value.trim();
-}
-
-/* =========================================================
-   ARRAYBUFFER → BASE64
-========================================================= */
-
-function arrayBufferToBase64(
-  buffer: ArrayBuffer,
-): string {
-  return Buffer.from(buffer).toString(
-    "base64",
-  );
 }
 
 /* =========================================================
@@ -94,34 +104,32 @@ function arrayBufferToBase64(
 ========================================================= */
 
 function isPdf(
-  buffer: ArrayBuffer,
+  fileBuffer: Buffer,
 ): boolean {
-  const bytes =
-    new Uint8Array(buffer);
+  if (fileBuffer.length < 4) {
+    return false;
+  }
 
-  // PDF files begin with %PDF
   return (
-    bytes.length >= 4 &&
-    bytes[0] === 0x25 &&
-    bytes[1] === 0x50 &&
-    bytes[2] === 0x44 &&
-    bytes[3] === 0x46
+    fileBuffer[0] === 0x25 &&
+    fileBuffer[1] === 0x50 &&
+    fileBuffer[2] === 0x44 &&
+    fileBuffer[3] === 0x46
   );
 }
 
 function isZip(
-  buffer: ArrayBuffer,
+  fileBuffer: Buffer,
 ): boolean {
-  const bytes =
-    new Uint8Array(buffer);
+  if (fileBuffer.length < 4) {
+    return false;
+  }
 
-  // DOCX files use the ZIP container format
   return (
-    bytes.length >= 4 &&
-    bytes[0] === 0x50 &&
-    bytes[1] === 0x4b &&
-    bytes[2] === 0x03 &&
-    bytes[3] === 0x04
+    fileBuffer[0] === 0x50 &&
+    fileBuffer[1] === 0x4b &&
+    fileBuffer[2] === 0x03 &&
+    fileBuffer[3] === 0x04
   );
 }
 
@@ -162,9 +170,9 @@ export async function POST(
   request: Request,
 ) {
   try {
-    // =====================================================
-    // 1. AUTHENTICATION
-    // =====================================================
+    /* =====================================================
+       1. AUTHENTICATION
+    ===================================================== */
 
     const session =
       await auth.api.getSession({
@@ -183,10 +191,10 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 2. RESUME UPLOAD RATE LIMIT
-    // 5 uploads / 10 minutes / USER
-    // =====================================================
+    /* =====================================================
+       2. RATE LIMIT
+       5 uploads / 10 minutes / USER
+    ===================================================== */
 
     const {
       success: uploadAllowed,
@@ -227,6 +235,7 @@ export async function POST(
         },
         {
           status: 429,
+
           headers: {
             ...rateLimitHeaders,
 
@@ -239,9 +248,9 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 3. GET UPLOADED FILE
-    // =====================================================
+    /* =====================================================
+       3. READ FORM DATA
+    ===================================================== */
 
     const formData =
       await request.formData();
@@ -263,9 +272,9 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 4. FILE SIZE VALIDATION
-    // =====================================================
+    /* =====================================================
+       4. BASIC FILE VALIDATION
+    ===================================================== */
 
     if (file.size === 0) {
       return NextResponse.json(
@@ -294,9 +303,9 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 5. MIME TYPE VALIDATION
-    // =====================================================
+    /* =====================================================
+       5. MIME TYPE VALIDATION
+    ===================================================== */
 
     if (
       file.type !== PDF_TYPE &&
@@ -313,15 +322,21 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 6. READ FILE
-    // =====================================================
+    /* =====================================================
+       6. READ FILE INTO NODE BUFFER
+    ===================================================== */
 
-    const buffer =
+    /*
+     * This is now our MASTER COPY.
+     *
+     * We never pass this Buffer directly into PDF.js.
+     */
+
+    const arrayBuffer =
       await file.arrayBuffer();
 
     if (
-      buffer.byteLength === 0
+      arrayBuffer.byteLength === 0
     ) {
       return NextResponse.json(
         {
@@ -334,13 +349,34 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 7. FILE SIGNATURE VALIDATION
-    // =====================================================
+    const fileBuffer =
+      Buffer.from(
+        new Uint8Array(
+          arrayBuffer,
+        ),
+      );
+
+    if (
+      fileBuffer.length === 0
+    ) {
+      return NextResponse.json(
+        {
+          error:
+            "Could not read uploaded file.",
+        },
+        {
+          status: 400,
+        },
+      );
+    }
+
+    /* =====================================================
+       7. FILE SIGNATURE VALIDATION
+    ===================================================== */
 
     if (
       file.type === PDF_TYPE &&
-      !isPdf(buffer)
+      !isPdf(fileBuffer)
     ) {
       return NextResponse.json(
         {
@@ -355,7 +391,7 @@ export async function POST(
 
     if (
       file.type === DOCX_TYPE &&
-      !isZip(buffer)
+      !isZip(fileBuffer)
     ) {
       return NextResponse.json(
         {
@@ -368,32 +404,33 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 8. EXTRACT TEXT
-    // =====================================================
+    /* =====================================================
+       8. EXTRACT TEXT
+    ===================================================== */
 
     let rawText = "";
 
     try {
       if (
-        file.type ===
-        PDF_TYPE
+        file.type === PDF_TYPE
       ) {
         /*
-         * extractPdfText() internally uses a COPY
-         * of the original ArrayBuffer.
-         *
-         * Therefore `buffer` remains intact.
+         * extractPdfText() creates its own
+         * independent copy.
          */
 
         rawText =
           await extractPdfText(
-            buffer,
+            fileBuffer,
           );
       } else {
+        /*
+         * Mammoth also receives a copy.
+         */
+
         rawText =
           await extractDocxText(
-            buffer,
+            fileBuffer,
           );
       }
     } catch (error) {
@@ -413,9 +450,9 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 9. EXTRACTED TEXT VALIDATION
-    // =====================================================
+    /* =====================================================
+       9. EXTRACTED TEXT VALIDATION
+    ===================================================== */
 
     if (!rawText) {
       return NextResponse.json(
@@ -444,20 +481,22 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 10. CONVERT ORIGINAL FILE TO BASE64
-    // =====================================================
+    /* =====================================================
+       10. CONVERT ORIGINAL FILE TO BASE64
+    ===================================================== */
 
     /*
-     * This uses the ORIGINAL buffer.
+     * IMPORTANT:
      *
-     * Because PDF extraction operated on a copy,
-     * this ArrayBuffer should still be attached.
+     * We use fileBuffer here.
+     *
+     * PDF.js only received a separate copy,
+     * so our original upload remains intact.
      */
 
     const fileData =
-      arrayBufferToBase64(
-        buffer,
+      fileBuffer.toString(
+        "base64",
       );
 
     if (!fileData) {
@@ -472,18 +511,18 @@ export async function POST(
       );
     }
 
-    // =====================================================
-    // 11. SANITIZE FILE NAME
-    // =====================================================
+    /* =====================================================
+       11. SANITIZE FILE NAME
+    ===================================================== */
 
     const safeFileName =
       sanitizeFileName(
         file.name,
       );
 
-    // =====================================================
-    // 12. SAVE RESUME TO DATABASE
-    // =====================================================
+    /* =====================================================
+       12. SAVE TO DATABASE
+    ===================================================== */
 
     const [resume] =
       await db
@@ -506,9 +545,9 @@ export async function POST(
           id: resumes.id,
         });
 
-    // =====================================================
-    // 13. RETURN SUCCESS
-    // =====================================================
+    /* =====================================================
+       13. RETURN SUCCESS
+    ===================================================== */
 
     return NextResponse.json(
       {
