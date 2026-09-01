@@ -38,10 +38,20 @@ const DOCX_TYPE =
 
 async function extractPdfText(
   buffer: ArrayBuffer,
-) {
+): Promise<string> {
+  /*
+   * IMPORTANT:
+   * PDF.js/unpdf may detach the ArrayBuffer that it receives.
+   *
+   * Use a copy so the original upload buffer remains usable
+   * later when converting the file to Base64.
+   */
+
+  const pdfBuffer = buffer.slice(0);
+
   const pdf =
     await getDocumentProxy(
-      new Uint8Array(buffer),
+      new Uint8Array(pdfBuffer),
     );
 
   const { text } =
@@ -58,7 +68,7 @@ async function extractPdfText(
 
 async function extractDocxText(
   buffer: ArrayBuffer,
-) {
+): Promise<string> {
   const result =
     await mammoth.extractRawText({
       buffer: Buffer.from(buffer),
@@ -73,7 +83,7 @@ async function extractDocxText(
 
 function arrayBufferToBase64(
   buffer: ArrayBuffer,
-) {
+): string {
   return Buffer.from(buffer).toString(
     "base64",
   );
@@ -369,6 +379,13 @@ export async function POST(
         file.type ===
         PDF_TYPE
       ) {
+        /*
+         * extractPdfText() internally uses a COPY
+         * of the original ArrayBuffer.
+         *
+         * Therefore `buffer` remains intact.
+         */
+
         rawText =
           await extractPdfText(
             buffer,
@@ -428,8 +445,15 @@ export async function POST(
     }
 
     // =====================================================
-    // 10. CONVERT FILE TO BASE64
+    // 10. CONVERT ORIGINAL FILE TO BASE64
     // =====================================================
+
+    /*
+     * This uses the ORIGINAL buffer.
+     *
+     * Because PDF extraction operated on a copy,
+     * this ArrayBuffer should still be attached.
+     */
 
     const fileData =
       arrayBufferToBase64(
@@ -510,6 +534,7 @@ export async function POST(
       },
       {
         status: 200,
+
         headers:
           rateLimitHeaders,
       },
