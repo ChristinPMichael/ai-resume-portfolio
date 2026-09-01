@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
+import { revalidateTag } from "next/cache";
+import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-
 import { db } from "@/db";
 
 import {
@@ -10,14 +11,10 @@ import {
   education,
 } from "@/db/schema";
 
-import { eq, and } from "drizzle-orm";
-
-import { revalidateTag } from "next/cache";
-
 export const runtime = "nodejs";
 
 /* =========================================================
-   Parse year safely
+   Helpers
 ========================================================= */
 
 function parseYear(
@@ -50,6 +47,26 @@ function parseYear(
   return year;
 }
 
+async function getUserPortfolio(
+  userId: string,
+) {
+  const [portfolio] = await db
+    .select({
+      id: portfolioProfiles.id,
+      username: portfolioProfiles.username,
+    })
+    .from(portfolioProfiles)
+    .where(
+      eq(
+        portfolioProfiles.userId,
+        userId,
+      ),
+    )
+    .limit(1);
+
+  return portfolio;
+}
+
 /* =========================================================
    POST
 ========================================================= */
@@ -77,6 +94,25 @@ export async function POST(request: Request) {
     ).trim();
 
     // =====================================================
+    // FIND USER PORTFOLIO
+    // =====================================================
+
+    const portfolio = await getUserPortfolio(
+      session.user.id,
+    );
+
+    if (!portfolio) {
+      return NextResponse.json(
+        {
+          error: "Portfolio not found.",
+        },
+        {
+          status: 404,
+        },
+      );
+    }
+
+    // =====================================================
     // DELETE
     // =====================================================
 
@@ -97,35 +133,6 @@ export async function POST(request: Request) {
         );
       }
 
-      // Find user's portfolio
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
-
-      if (!portfolio) {
-        return NextResponse.json(
-          {
-            error:
-              "Portfolio not found.",
-          },
-          {
-            status: 404,
-          },
-        );
-      }
-
-      // Delete only user's education
       const [deletedEducation] =
         await db
           .delete(education)
@@ -157,7 +164,6 @@ export async function POST(request: Request) {
         );
       }
 
-      // Invalidate public portfolio cache
       revalidateTag(
         `portfolio:${portfolio.username}`,
         "max",
@@ -269,37 +275,6 @@ export async function POST(request: Request) {
       }
 
       // ===================================================
-      // FIND USER PORTFOLIO
-      // ===================================================
-
-      const [portfolio] = await db
-        .select({
-          id: portfolioProfiles.id,
-          username:
-            portfolioProfiles.username,
-        })
-        .from(portfolioProfiles)
-        .where(
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        )
-        .limit(1);
-
-      if (!portfolio) {
-        return NextResponse.json(
-          {
-            error:
-              "Portfolio not found.",
-          },
-          {
-            status: 404,
-          },
-        );
-      }
-
-      // ===================================================
       // UPDATE EDUCATION
       // ===================================================
 
@@ -341,10 +316,6 @@ export async function POST(request: Request) {
           },
         );
       }
-
-      // ===================================================
-      // INVALIDATE PUBLIC PORTFOLIO CACHE
-      // ===================================================
 
       revalidateTag(
         `portfolio:${portfolio.username}`,
@@ -459,35 +430,14 @@ export async function POST(request: Request) {
     // VERIFY OWNERSHIP
     // =====================================================
 
-    const [portfolio] = await db
-      .select({
-        id: portfolioProfiles.id,
-        username:
-          portfolioProfiles.username,
-      })
-      .from(portfolioProfiles)
-      .where(
-        and(
-          eq(
-            portfolioProfiles.id,
-            portfolioId,
-          ),
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        ),
-      )
-      .limit(1);
-
-    if (!portfolio) {
+    if (portfolio.id !== portfolioId) {
       return NextResponse.json(
         {
           error:
-            "Portfolio not found.",
+            "You do not have permission to modify this portfolio.",
         },
         {
-          status: 404,
+          status: 403,
         },
       );
     }
@@ -497,24 +447,17 @@ export async function POST(request: Request) {
     // =====================================================
 
     await db.insert(education).values({
-      portfolioId:
-        portfolio.id,
-
+      portfolioId: portfolio.id,
       institution,
-
-      degree:
-        degree || null,
-
+      degree: degree || null,
       fieldOfStudy:
         fieldOfStudy || null,
-
       startYear,
-
       endYear,
     });
 
     // =====================================================
-    // INVALIDATE PUBLIC PORTFOLIO CACHE
+    // INVALIDATE CACHE
     // =====================================================
 
     revalidateTag(
