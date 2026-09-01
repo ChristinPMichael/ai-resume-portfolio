@@ -1,16 +1,27 @@
 import { NextResponse } from "next/server";
+import { headers } from "next/headers";
+import { revalidateTag } from "next/cache";
+import { and, eq } from "drizzle-orm";
 
 import { auth } from "@/lib/auth";
-import { headers } from "next/headers";
-
 import { db } from "@/db";
 import { portfolioProfiles } from "@/db/schema";
 
-import { eq, and } from "drizzle-orm";
-
-import { revalidateTag } from "next/cache";
-
 export const runtime = "nodejs";
+
+const allowedThemes = [
+  "minimal",
+  "developer",
+  "modern",
+] as const;
+
+const allowedAccentColors = [
+  "default",
+  "blue",
+  "purple",
+  "green",
+  "orange",
+] as const;
 
 export async function POST(request: Request) {
   try {
@@ -47,25 +58,7 @@ export async function POST(request: Request) {
     ).trim();
 
     // =====================================================
-    // ALLOWED VALUES
-    // =====================================================
-
-    const allowedThemes = [
-      "minimal",
-      "developer",
-      "modern",
-    ];
-
-    const allowedAccentColors = [
-      "default",
-      "blue",
-      "purple",
-      "green",
-      "orange",
-    ];
-
-    // =====================================================
-    // VALIDATION
+    // REQUIRED PORTFOLIO ID
     // =====================================================
 
     if (!portfolioId) {
@@ -80,7 +73,15 @@ export async function POST(request: Request) {
       );
     }
 
-    if (!allowedThemes.includes(theme)) {
+    // =====================================================
+    // THEME VALIDATION
+    // =====================================================
+
+    if (
+      !allowedThemes.includes(
+        theme as (typeof allowedThemes)[number],
+      )
+    ) {
       return NextResponse.json(
         {
           error: "Invalid theme.",
@@ -91,9 +92,15 @@ export async function POST(request: Request) {
       );
     }
 
+    // =====================================================
+    // ACCENT COLOR VALIDATION
+    // =====================================================
+
     if (
       !allowedAccentColors.includes(
-        accentColor,
+        accentColor as (
+          typeof allowedAccentColors
+        )[number],
       )
     ) {
       return NextResponse.json(
@@ -108,7 +115,7 @@ export async function POST(request: Request) {
     }
 
     // =====================================================
-    // VERIFY OWNERSHIP
+    // FIND AUTHENTICATED USER'S PORTFOLIO
     // =====================================================
 
     const [portfolio] = await db
@@ -148,25 +155,41 @@ export async function POST(request: Request) {
     // UPDATE THEME
     // =====================================================
 
-    await db
-      .update(portfolioProfiles)
-      .set({
-        theme,
-        accentColor,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(
-          eq(
-            portfolioProfiles.id,
-            portfolioId,
+    const [updatedPortfolio] =
+      await db
+        .update(portfolioProfiles)
+        .set({
+          theme,
+          accentColor,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(
+              portfolioProfiles.id,
+              portfolio.id,
+            ),
+            eq(
+              portfolioProfiles.userId,
+              session.user.id,
+            ),
           ),
-          eq(
-            portfolioProfiles.userId,
-            session.user.id,
-          ),
-        ),
+        )
+        .returning({
+          id: portfolioProfiles.id,
+        });
+
+    if (!updatedPortfolio) {
+      return NextResponse.json(
+        {
+          error:
+            "Portfolio could not be updated.",
+        },
+        {
+          status: 500,
+        },
       );
+    }
 
     // =====================================================
     // INVALIDATE PUBLIC PORTFOLIO CACHE
